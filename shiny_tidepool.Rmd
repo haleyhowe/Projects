@@ -1,0 +1,568 @@
+---
+ title: "shiny_Tidepool"
+output: html_document
+---
+```{r}
+library("readxl")
+library(ggrepel)
+library(ggplot2)
+library(dplyr)
+library(caret)
+library(class)
+library(caTools)
+library(chron)
+library(viridis)
+library(scales)
+library(grid)
+library(lubridate)
+library(rlist)
+```
+
+```{r}
+install.packages("rlist")
+```
+
+```{r}
+setwd("~/Desktop/HS650")
+cgm = read_excel('Data_1.xlsx', sheet = 2) 
+smbg = read_excel('Data_1.xlsx', sheet = 1)
+basal = read_excel('Data_1.xlsx', sheet = 6)
+bolus = read_excel('Data_1.xlsx', sheet = 4)
+
+```
+```{r}
+
+#Changing the column names to readable in R
+#CGM
+colnames(cgm)[7] <- "Local_Time"
+#Basal
+colnames(basal)[14] <- "Local_Time"
+colnames(basal)[4] <- "Delivery_Type"
+#Bolus
+colnames(bolus)[12] <- "Local_Time"
+#Smbg
+colnames(smbg)[8] <- "Local_Time"
+
+
+```
+
+```{r}
+#Connverting Basal times to UTC format 
+basal$Local_Time <- as.numeric(as.character(basal$Local_Time)) 
+basal$Local_Time <- as.POSIXct(basal$Local_Time*3600*24, origin=as.Date("1900-01-01")-2, tz="UTC")
+```
+
+```{r}
+#Rounding times to nearest minute
+cgm$Local_Time <- round_date(cgm$Local_Time, unit = "minute")
+smbg$Local_Time <- round_date(smbg$Local_Time, unit = "minute")
+basal$Local_Time <- round_date(basal$Local_Time, unit = "minute")
+bolus$Local_Time <- round_date(bolus$Local_Time, unit = "minute")
+
+```
+
+
+
+
+```{r}
+
+#Some functions to help with preprocessing 
+
+#Subsets by device type
+device_type <- function(dataset,column_name, x){
+  col_1 = dataset[column_name]
+  new_subset <- subset(dataset,  col_1 == x)
+  return(new_subset)
+}
+
+#Subsets by day and month 
+myday_month <- function(xday, xmonth, dtype){
+  new_subset <- subset(dtype, ((day(dtype$Local_Time) == xday & months(dtype$Local_Time)==xmonth)))
+  if ((dim(new_subset)[1]) ==0){
+    print("There is no data for this month and day.")
+  }
+  return(new_subset)
+}
+
+#Initiates a new column for high/low alerts 
+high_low <- function(dataset){
+  dataset$High_low <- NA
+  return(dataset)
+}
+```
+
+
+
+
+```{r}
+#Subsetting the data by device type 
+
+#Smbg
+smbg_data <- myday_month(4,"September", smbg)
+
+#Cgm
+cgm_data <- myday_month(4,"September", cgm)
+
+#Basal- subsetting by "temp" delivery
+temp_deliv <- device_type(basal, 'Delivery_Type', "temp")
+
+#September 4 Temp Basal Rates 
+temp_basal <- myday_month(4,"September", temp_deliv)
+
+#Bolus
+bolus_data <- myday_month(4,"September", bolus)
+
+```
+
+```{r}
+
+cgm_data$High_low <- NA
+x = 1
+for (y in x:nrow(cgm_data)) {
+  if (x==1) {
+    if((cgm_data$Value[x] <= 70 & cgm_data$Value[x+1]  <= 70 & cgm_data$Value[x+2]<= 70 &  cgm_data$Value[x+3]<= 70)  & ( cgm_data$Local_Time[x]- cgm_data$Local_Time[x+3] == dminutes(15))){
+      cgm_data$High_low[x+2] <- "Low"
+      x = x+3
+      next
+    }
+    if(cgm_data$Value[x] >=180 & cgm_data$Value[x+1]  >=180 & cgm_data$Value[x+2]>=180  &  cgm_data$Value[x+3]>= 180 & ( cgm_data$Local_Time[x]- cgm_data$Local_Time[x+3] == dminutes(15))){
+      cgm_data$High_low[x+2] <- "High"
+
+      x = x+3
+      next
+    }
+    else{
+  
+    cgm_data$High_low[x] <- "Normal"
+    x = x +1
+    next
+      }
+    }
+
+    if(x == nrow(cgm_data)){
+    if((cgm_data$Value[x] <= 70 & cgm_data$Value[x-1]  <= 70 & cgm_data$Value[x-2]<= 70 & cgm_data$Value[x-3]<= 70 ) & (cgm_data$Local_Time[x-3]- cgm_data$Local_Time[x] == dminutes(15))){
+      cgm_data$High_low[x] <- "Low"
+      break
+    }
+      if((cgm_data$Value[x] >= 180 & cgm_data$Value[x-1]  >= 180 & cgm_data$Value[x-2]>= 180 & cgm_data$Value[x-3]>= 180) & (cgm_data$Local_Time[x-3]- cgm_data$Local_Time[x] == dminutes(15))){
+      cgm_data$High_low[x] <- "High"
+      break
+    }
+    
+    
+  else {
+     if (cgm_data$High_low[x-1] == "High" & cgm_data$Value[x] >= 180){
+    cgm_data$High_low[x] <- "High"
+    break
+     }
+     if (cgm_data$High_low[x-1] == "Low" & cgm_data$Value[x] <= 70){
+    cgm_data$High_low[x] <- "Low"
+    break
+     }
+    else{
+      cgm_data$High_low[x] <- "Normal"
+      break
+    }
+  
+  }
+    }
+    
+  
+ if(x != 1 & x != nrow(cgm_data) & x != nrow(cgm_data)-1) {
+    if(cgm_data$High_low[x-1]== "Normal"){
+      for(y in x:nrow(cgm_data)){
+        if((cgm_data$Value[x] >= 180 & cgm_data$Value[x+1] >= 180 & cgm_data$Value[x+2]>= 180 & cgm_data$Value[x+3]>= 180 )& ( cgm_data$Local_Time[x]- cgm_data$Local_Time[x+3] == dminutes(15))){
+
+          cgm_data$High_low[x] <- "Normal"
+          cgm_data$High_low[x+1] <- "Normal" 
+          cgm_data$High_low[x+2] <- "Normal"
+          cgm_data$High_low[x+3] <- "High" 
+          x = x+4
+          break
+        }
+        
+        if((cgm_data$Value[x] <= 70 & cgm_data$Value[x+1]  <= 70 & cgm_data$Value[x+2]<= 70 & cgm_data$Value[x+3]<= 70 ) & ( cgm_data$Local_Time[x]- cgm_data$Local_Time[x+3] == dminutes(15))){
+
+         cgm_data$High_low[x] <- "Normal"
+          cgm_data$High_low[x+1] <- "Normal" 
+          cgm_data$High_low[x+2] <- "Normal"
+          cgm_data$High_low[x+3] <- "Low" 
+          x = x+4
+          break
+          }
+        else{
+        cgm_data$High_low[x] <- "Normal"
+        cgm_data$High_low[x+1] <- "Normal" 
+
+        x = x+1
+        break
+        }
+        
+      }
+    }
+      else{
+        for(y in x:nrow(cgm_data)){
+          if(cgm_data$Value[x] <= 70 & cgm_data$High_low[x-1]== "Low"){
+            cgm_data$High_low[x] <- "Low"
+            x = x+1 
+            break
+          }
+          if(cgm_data$Value[x] >= 180 & cgm_data$High_low[x-1]== "High"){
+            cgm_data$High_low[x] <- "High"
+            x = x+1 
+            break
+          }
+          else{
+            cgm_data$High_low[x] <- "Normal"
+            x = x+1
+           break
+         }
+      }
+   
+    }
+   
+ }
+}
+```
+
+```{r}
+
+#High alerts- cgm 
+high_cgm <- subset(cgm_data, (High_low == "High"))
+
+#Low alerts- cgm 
+low_cgm <- subset(cgm_data, (High_low == "Low"))
+
+```
+
+
+```{r}
+library(shiny)
+
+ui <- fluidPage(
+  
+#Inputs 
+selectInput(inputId= "input_month", label = "Select Month", choices = ("September"),multiple = FALSE),
+
+numericInput(inputId = "input_day", value = 4, label = "Select Day ", min = 4, max = 31),
+
+selectInput(inputId= "function_name", label = "Select Function", choices = c("temp_smbg" = "temp", "high_smbg" = "high", "freq_smbg_5" = "freq" , "highBG_insulin" = "highBG", "bolus_high" = "highbol" , "low_smbg" = "lowsmbg", "freq_smbg_low" = "freqlow",
+"lowBG_insulin" = "lowinsul", "bolus_low" = "bollow"),multiple = FALSE),
+
+#Outputs
+verbatimTextOutput(outputId = "text")
+)
+
+
+ 
+server <- function(input, output){
+  
+#  #Subsetting data by specific day and month requested by the user 
+#    day_month <- reactive({
+#       new_subset <- subset(cgm, ((day(cgm$Local_Time) ==input$input_day &            months(cgm$Local_Time)==input$input_month)))
+#       new_subset$High_low <- "test"
+#       if ((dim(new_subset)[1]) ==0){
+#           print("There is no data for this month and day.")
+#         }
+#         return (new_subset)
+#   }
+# )
+# 
+# # bolus_data <- reactive({myday_month(4,"September", bolus)
+# #   })
+# 
+#    
+#     #Subsetting by day and month 
+#    day_and_month <- reactive({
+#   day_month()
+#  }
+# )
+
+  
+
+#Function will count the number of times user checked fingerstick within a certain amount of time after setting 'temp'
+ temp_smbg <- reactive({
+ 
+   count = 0
+
+for (i in 1:nrow(smbg_data)){
+ for (x in 1:nrow(temp_basal)){
+if(smbg_data$Local_Time[i] > temp_basal$Local_Time[x]){
+     if((smbg_data$Local_Time[i]- temp_basal$Local_Time[x]) < dminutes(60)){
+       count = count + 1
+     list1 = list()
+      return(print(paste("Time difference of: ", smbg_data$Local_Time[i] -(temp_basal$Local_Time[x]), "minutes", "\nTime user set device to 'temp setting': ",temp_basal$Local_Time[x], "\nFingerstick input time: ",smbg_data$Local_Time[i])))
+ 
+      
+      }
+   }
+  }
+}
+    for (i in 1:nrow(list1)){
+      print(list1[i][1])
+    }
+     
+   
+  }
+ )
+ 
+ high_smbg <- reactive({
+if ((dim(high_cgm)[1]) ==0){
+          return(print("There were no high glucose alerts for this day."))
+        }
+count = 0
+   print(paste("Count = ",count))
+for (i in 1:nrow(smbg_data)){
+  for (x in 1:nrow(high_cgm)){
+    if(smbg_data$Local_Time[i] > high_cgm$Local_Time[x]){
+      if((smbg_data$Local_Time[i]- high_cgm$Local_Time[x]) < dminutes(30)){
+        count = count + 1
+       return(print(paste("Time difference of: ", smbg_data$Local_Time[i] -(high_cgm$Local_Time[x]) , " minutes", "\nHigh Glucose Alert Time:",high_cgm$Local_Time[x],"\nFingerstick input Time:", smbg_data$Local_Time[i])))
+      
+      }
+    }
+  }
+}
+ }
+)
+ 
+ freq_smbg_5 <- reactive({
+
+ if ((dim(high_cgm)[1]) ==0){
+          return(print("Unable to calculate due to no High glucose alerts for this day."))
+        }  
+   count=0
+      print(paste("Count = ",count))
+for (i in 1:nrow(smbg_data)){
+  for (x in 1:nrow(high_cgm)){
+    if(smbg_data$Local_Time[i] > high_cgm$Local_Time[x]){
+      if((smbg_data$Local_Time[i]- high_cgm$Local_Time[x]) < dminutes(5)){
+        count = count + 1
+        print(paste(smbg_data$Local_Time[i] -(high_cgm$Local_Time[x]), "Fingerstick Input Time:",smbg_data$Local_Time[i], "High Glucose Alert Time:", high_cgm$Local_Time[x]))
+       
+      }
+    }
+  }
+}
+      print(paste( "Frequency of BG Check entry within 5 min of high glucose alert: ",count))
+ }
+)
+ 
+ highBG_insulin <- reactive({
+count=0
+   print(paste("Count = ",count))
+
+if ((dim(high_cgm)[1]) ==0){
+          return(print("Unable to calculate due to no High glucose alerts for this day."))
+        }  
+for (i in 1:nrow(bolus_data)){
+  for (x in 1:nrow(high_cgm)){
+    if(bolus_data$Local_Time[i] > high_cgm$Local_Time[x]){
+      if((bolus_data$Local_Time[i]- high_cgm$Local_Time[x]) < dminutes(60)){
+        count = count + 1
+       return(print(paste("Time difference of: ",bolus_data$Local_Time[i] -(high_cgm$Local_Time[x]), " minutes", "\nHigh Glucose Alert Time: ", high_cgm$Local_Time[x], "\nInsulin Bolus Time: ",bolus_data$Local_Time[i])))
+      
+  
+      }
+    }
+  }
+}
+ }
+)
+ 
+ bolus_high <- reactive({
+if ((dim(high_cgm)[1]) ==0){
+          return(print("Unable to calculate due to no High glucose alerts for this day."))
+        }  
+   
+   count=0
+      print(paste("Count = ",count))
+
+for (i in 1:nrow(bolus_data)){
+  for (x in 1:nrow(high_cgm)){
+    if(bolus_data$Local_Time[i] > high_cgm$Local_Time[x]){
+      if((bolus_data$Local_Time[i]- high_cgm$Local_Time[x]) < dminutes(1)){
+        count = count + 1
+        print(bolus_data$Local_Time[i] -(high_cgm$Local_Time[x]))
+        print(paste("High Glucose Alert Time:", high_cgm$Local_Time[x]))
+        print(paste("Insulin Bolus Time:",bolus_data$Local_Time[i]))
+        print(" ")
+      }
+
+    }
+  }
+}
+ 
+print(paste("Frequency of insulin bolus within *1 min* of high BG alert: ", count))
+   }
+ 
+)
+ 
+ low_smbg <- reactive({
+   if ((dim(low_cgm)[1]) ==0){
+          return(print("Unable to calculate due to no Low glucose alerts for this day."))
+        }  
+   
+   count = 0
+      print(paste("Count = ",count))
+
+for (i in 1:nrow(smbg_data)){
+  for (x in 1:nrow(low_cgm)){
+    if(smbg_data$Local_Time[i] > low_cgm$Local_Time[x]){
+      if((smbg_data$Local_Time[i]- low_cgm$Local_Time[x]) < dminutes(30)){
+        count = count + 1
+        return(print(paste("Time difference of: ",smbg_data$Local_Time[i] -(low_cgm$Local_Time[x])," minutes", "\nLow Glucose Alert Time: ",low_cgm$Local_Time[x],"\nFingerstick input Time: ", smbg_data$Local_Time[i])))
+      }
+    }
+  }
+}
+
+ }
+)
+ 
+ freq_smbg_low <- reactive({
+if ((dim(low_cgm)[1]) ==0){
+          return(print("Unable to calculate due to no Low glucose alerts for this day."))
+        }  
+   
+   count=0
+      print(paste("Count = ",count))
+
+for (i in 1:nrow(smbg_data)){
+  for (x in 1:nrow(low_cgm)){
+    if(smbg_data$Local_Time[i] > low_cgm$Local_Time[x]){
+      if((smbg_data$Local_Time[i]- low_cgm$Local_Time[x]) < dminutes(5)){
+        count = count + 1
+        print(smbg_data$Local_Time[i] -(low_cgm$Local_Time[x]))
+        print(paste("Fingerstick input Time:",smbg_data$Local_Time[i]))
+        print(paste("Low Glucose Alert Time:", low_cgm$Local_Time[x]))
+      }
+    }
+  }
+}
+print(paste("Frequency of BG Check entry within *5 min* of Low glucose alert: ",count))
+}
+)
+
+ lowBG_insulin <- reactive({
+  
+if ((dim(low_cgm)[1]) ==0){
+          return(print("Unable to calculate due to no Low glucose alerts for this day."))
+        }  
+   count=0
+      print(paste("Count = ",count))
+
+for (i in 1:nrow(bolus_data)){
+  for (x in 1:nrow(low_cgm)){
+    if(bolus_data$Local_Time[i] > low_cgm$Local_Time[x]){
+      if((bolus_data$Local_Time[i]- low_cgm$Local_Time[x]) < dminutes(60)){
+        count = count + 1
+        return(print(paste("Time difference of: ",bolus_data$Local_Time[i] -(low_cgm$Local_Time[x])," minutes","\nLow Glucose Alert Time: ", low_cgm$Local_Time[x], "\nInsulin Bolus Time: ",bolus_data$Local_Time[i])))
+      
+      }
+    }
+  }
+}
+   
+   if(count ==0){
+     return(print("There were no events of a low glucose alert and insulin bolus that have occured within 60 min of each other."))
+   }
+ }
+ 
+)
+ 
+ bolus_low<- reactive({
+if ((dim(low_cgm)[1]) ==0){
+          return(print("Unable to calculate due to no Low glucose alerts for this day."))
+        }  
+   
+   count=0
+      print(paste("Count = ",count))
+
+for (i in 1:nrow(bolus_data)){
+  for (x in 1:nrow(low_cgm)){
+    if(bolus_data$Local_Time[i] > low_cgm$Local_Time[x]){
+      if((bolus_data$Local_Time[i]- low_cgm$Local_Time[x]) < dminutes(1)){
+        count = count + 1
+        print(bolus_data$Local_Time[i] -(low_cgm$Local_Time[x]))
+        print(paste("Low Glucose Alert Time:", low_cgm$Local_Time[x]))
+        print(paste("Insulin Bolus Time:",bolus_data$Local_Time[i]))
+        print(" ")
+      }
+
+    }
+  }
+}
+print(paste("Frequency of insulin bolus within *1 min* of Low BG alert:", count))
+}
+)
+
+
+
+ 
+ 
+
+  output$text <- renderText({
+  if(input$function_name == "temp"){
+    temp_smbg()
+  }
+    else if (input$function_name == "high"){
+    high_smbg()
+    }
+    
+     else if (input$function_name == "high"){
+    high_smbg()
+    }
+
+  
+   else if (input$function_name == "freq"){
+    freq_smbg_5()
+    }
+
+  
+ else if (input$function_name == "highBG"){
+    highBG_insulin()
+    }
+
+  
+ else if (input$function_name == "highbol"){
+    bolus_high()
+    }
+
+  
+ else if (input$function_name == "lowsmbg"){
+   low_smbg()
+    }
+
+  
+ else if (input$function_name == "freqlow"){
+    freq_smbg_low()
+    }
+
+  
+ else if (input$function_name == "bollow"){
+    bolus_low()
+    }
+
+  
+else if (input$function_name == "lowinsul"){
+    lowBG_insulin()
+    }
+
+  })
+  
+ 
+
+    
+  }
+  
+
+
+
+shinyApp(ui = ui, server = server)
+
+
+```
+
+
+

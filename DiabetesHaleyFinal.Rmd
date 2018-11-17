@@ -1,0 +1,389 @@
+---
+title: "Diabetes.HaleyHowell"
+output: html_document
+---
+```{r}
+library(dplyr)
+library(caret)
+library(class)
+library(caTools)
+library(zoo)
+library(stringr)
+library(rebus)
+library(factoextra)
+library(dummies)
+library(ranger)
+library(DMwR)
+library(gridExtra)
+library(car)
+library(ROSE)
+
+```
+
+```{r}
+set.seed(3033)
+```
+Randomly setting the seed 
+```{r}
+setwd("/Users/haleyhowell/Library/Mobile Documents/com~apple~CloudDocs/Documents/Grad School/HS614- Nguyen/Data Project/dataset_diabetes")
+
+diabetes_load = read.csv('diabetic_data.csv', encoding = "UTF-16", header = TRUE, na.strings = "?")
+```
+
+Loading in the original data set 
+```{r}
+#Changing the factors 
+factor_cols <- c("admission_type_id", "discharge_disposition_id", "admission_source_id", "diag_1", "diag_2", "diag_3", "max_glu_serum", "A1Cresult")
+diabetes_load[factor_cols] <- lapply(diabetes_load[factor_cols], as.factor)
+```
+Changed the values that were read in as integers to factors to allow R to recognize them as factors  
+```{r}
+#splitting the data into training and testing data 
+trainIndex <- createDataPartition(diabetes_load$readmitted, p = .8, list = FALSE,times = 1)
+
+diagTrain <- diabetes_load[ trainIndex,]
+diagTest  <- diabetes_load[-trainIndex,]
+```
+Splitting the data into training and testing sets, used recommended 80/20 rule 
+```{r}
+#CLEANING THE DATA
+
+#removes duplicated patients(train)
+duplicated(diagTrain$patient_nbr) 
+diagTrain <- diagTrain[!duplicated(diagTrain$patient_nbr), ] 
+length(unique(diagTrain$patient_nbr))
+
+#removes duplicated patients(test)
+duplicated(diagTest$patient_nbr) 
+diagTest <- diagTest[!duplicated(diagTest$patient_nbr), ] 
+length(unique(diagTest$patient_nbr))
+
+
+```
+Removed duplicated patients that had the same patient number id to only obtain unique values in the data set. Found multiple instances of the same patient id and decided to keep the first instance and remove others to avoid instances that may be outliers due to multiple readmissions within the same year. 
+```{r}
+#remove dead people(train)
+diagTrain <- subset(diagTrain, discharge_disposition_id != "11")
+diagTrain <- subset(diagTrain, discharge_disposition_id != "13")
+diagTrain <- subset(diagTrain, discharge_disposition_id != "14")
+diagTrain <- subset(diagTrain, discharge_disposition_id != "19")
+diagTrain <- subset(diagTrain, discharge_disposition_id != "20")
+diagTrain <- subset(diagTrain, discharge_disposition_id != "21")
+diagTrain$discharge_disposition_id <- factor(diagTrain$discharge_disposition_id)
+#remove dead people(test)
+diagTest <- subset(diagTest, discharge_disposition_id != "11")
+diagTest <- subset(diagTest, discharge_disposition_id != "13")
+diagTest <- subset(diagTest, discharge_disposition_id != "14")
+diagTest <- subset(diagTest, discharge_disposition_id != "19")
+diagTest <- subset(diagTest, discharge_disposition_id != "20")
+diagTest <- subset(diagTest, discharge_disposition_id != "21")
+diagTest$discharge_disposition_id <- factor(diagTest$discharge_disposition_id)
+
+```
+Found codes that distinguished that the patient was dead, therefore removed these values because of course they will not be readmitted into the hospital, they are dead. 
+```{r}
+# delete cols(train)
+deleted_cols <- names(diagTrain) %in% c("weight",  "examide", "citoglipton", "medical_specialty", "payer_code")
+diagTrain = diagTrain[!deleted_cols]
+# delete cols(test)
+deleted_cols <- names(diagTest) %in% c("weight",  "examide", "citoglipton", "medical_specialty", "payer_code")
+diagTest = diagTest[!deleted_cols]
+```
+Removed med specialty, payer code and weight because more than 50% of the data was missing.
+Removed examide and citoglipton because there was zero variance in the variables. 
+```{r}
+#delete na's(train)
+diagTrain <- na.omit(diagTrain)
+#delete na's(test)
+diagTest <- na.omit(diagTest)
+```
+Omitted na's because the models would not run with them present in the data set. This also helped  reduce the data set because it was so large to run models. 
+```{r}
+#reformatting diag variable to types of disease(train)
+diagTrain$diag_1 <- as.character(diagTrain$diag_1)
+diagTrain$diag_1[str_detect(diagTrain$diag_1, pattern = START %R% or("39","40","41","42","43","44","45","785")) == T] <- "Circulatory"
+diagTrain$diag_1[str_detect(diagTrain$diag_1, pattern = START %R% or("52","53","54","55","56","57","787")) == T] <- "Digestive"
+diagTrain$diag_1[str_detect(diagTrain$diag_1, pattern = START %R% or("58","59","60","61","62","788")) == T] <- "Genitourinary"
+diagTrain$diag_1[str_detect(diagTrain$diag_1, pattern = START %R% "25") == T] <- "Diabetes"
+diagTrain$diag_1[str_detect(diagTrain$diag_1, pattern = START %R% or("80","81","82","83","84","85",
+                                                                   "86","87","88","89","90","91",
+                                                                   "92","93","94","95","96","97",
+                                                                   "98","99")) == T] <- "Injury"
+diagTrain$diag_1[str_detect(diagTrain$diag_1, pattern = START %R% or("71","72","73")) == T] <- "Musculoskeletal"
+diagTrain$diag_1[str_detect(diagTrain$diag_1, pattern = START %R% or("14","15","16","17","18","19",
+                                                                   "20","21","22","23")) == T] <- "Neoplasms"
+diagTrain$diag_1[str_detect(diagTrain$diag_1, pattern = START %R% or("46","47","48","49","50","51","786")) == T] <- "Respiratory"
+diagTrain$diag_1[str_detect(diagTrain$diag_1, pattern = "[[:digit:]]") == T] <- "Other"
+diagTrain$diag_1 <- as.factor(diagTrain$diag_1)
+summary(diagTrain$diag_1)
+
+
+#reformatting diag variable to types of disease(test)
+diagTest$diag_1 <- as.character(diagTest$diag_1)
+diagTest$diag_1[str_detect(diagTest$diag_1, pattern = START %R% or("39","40","41","42","43","44","45","785")) == T] <- "Circulatory"
+diagTest$diag_1[str_detect(diagTest$diag_1, pattern = START %R% or("52","53","54","55","56","57","787")) == T] <- "Digestive"
+diagTest$diag_1[str_detect(diagTest$diag_1, pattern = START %R% or("58","59","60","61","62","788")) == T] <- "Genitourinary"
+diagTest$diag_1[str_detect(diagTest$diag_1, pattern = START %R% "25") == T] <- "Diabetes"
+diagTest$diag_1[str_detect(diagTest$diag_1, pattern = START %R% or("80","81","82","83","84","85",
+                                                                     "86","87","88","89","90","91",
+                                                                     "92","93","94","95","96","97",
+                                                                     "98","99")) == T] <- "Injury"
+diagTest$diag_1[str_detect(diagTest$diag_1, pattern = START %R% or("71","72","73")) == T] <- "Musculoskeletal"
+diagTest$diag_1[str_detect(diagTest$diag_1, pattern = START %R% or("14","15","16","17","18","19",
+                                                                     "20","21","22","23")) == T] <- "Neoplasms"
+diagTest$diag_1[str_detect(diagTest$diag_1, pattern = START %R% or("46","47","48","49","50","51","786")) == T] <- "Respiratory"
+diagTest$diag_1[str_detect(diagTest$diag_1, pattern = "[[:digit:]]") == T] <- "Other"
+diagTest$diag_1 <- as.factor(diagTest$diag_1)
+summary(diagTest$diag_1)
+```
+Used diag1 because that is the primary diagnoses and the most important compared to the second and third diagnoses codes. Grouped diag1 codes to specific regions of the body because I wanted to see what regions of the body affected readmission, the first 2 numbers determine the part of the body that was affected during the time they were in the hospital. 
+```{r}
+#regrouping recode(train)
+diagTrain$admission_source_id <- as.character(diagTrain$admission_source_id)
+diagTrain$admission_source_id <- recode(diagTrain$admission_source_id, "c(1,2,3) = 'Refer'")
+diagTrain$admission_source_id <- recode(diagTrain$admission_source_id, "c(4,5,6,10,18,19,22,25,26) = 'Transfer'")
+diagTrain$admission_source_id[diagTrain$admission_source_id== "7"] <- "ER"
+diagTrain$admission_source_id[diagTrain$admission_source_id== "8"] <- "Court"
+diagTrain$admission_source_id <- recode(diagTrain$admission_source_id, "c(9,15,17,20,21) = 'Unknown'")
+diagTrain$admission_source_id <- recode(diagTrain$admission_source_id, "c(11,12,13,14,23,24) = 'Pediatric'")
+diagTrain$admission_source_id <- as.factor(diagTrain$admission_source_id)
+
+#regrouping recode(test)
+diagTest$admission_source_id <- as.character(diagTest$admission_source_id)
+diagTest$admission_source_id <- recode(diagTest$admission_source_id, "c(1,2,3) = 'Refer'")
+diagTest$admission_source_id <- recode(diagTest$admission_source_id, "c(4,5,6,10,18,19,22,25,26) = 'Transfer'")
+diagTest$admission_source_id[diagTest$admission_source_id== "7"] <- "ER"
+diagTest$admission_source_id[diagTest$admission_source_id== "8"] <- "Court"
+diagTest$admission_source_id <- recode(diagTest$admission_source_id, "c(9,15,17,20,21) = 'Unknown'")
+diagTest$admission_source_id <- recode(diagTest$admission_source_id, "c(11,12,13,14,23,24) = 'Pediatric'")
+diagTest$admission_source_id <- as.factor(diagTest$admission_source_id)
+```
+Grouped together similar reasons they would be admitted and to lower the amount of factors
+```{r}
+#taking out instances that never returned to the hospital(train) 
+diagTrain <- subset(diagTrain, readmitted ==">30" | readmitted=="<30")
+diagTrain$readmitted <- factor(diagTrain$readmitted)
+diagTrain$readmitted <- as.character(diagTrain$readmitted)
+diagTrain$readmitted[diagTrain$readmitted=='<30'] <- 'Yes'
+diagTrain$readmitted[diagTrain$readmitted=='>30'] <- 'No'
+diagTrain$readmitted <- factor(diagTrain$readmitted)
+#taking out instances that never returned to the hospital(test)
+diagTest <- subset(diagTest, readmitted ==">30" | readmitted=="<30")
+diagTest$readmitted <- factor(diagTest$readmitted)
+diagTest$readmitted <- as.character(diagTest$readmitted)
+diagTest$readmitted[diagTest$readmitted=='<30'] <- 'Yes'
+diagTest$readmitted[diagTest$readmitted=='>30'] <- 'No'
+diagTest$readmitted <- factor(diagTest$readmitted)
+```
+Subsetted the readmitted column to get rid of the instances that never came back to the hospital and to narrow down the outcome variable to readmitted variable to less than 30 days or more than 30 days because financially, the hospitals get paid based off of readmissions before 30 days, therfore I wanted to see readmissions chronologically. I also changed readmitted to yes and no factors because R did not appreciate the '<' and '>' signs that were in the data before. 
+
+```{r}
+#VISUALIZING THE DATA
+plot_1 <- ggplot(diagTrain, aes(x = age, y = num_medications, color = readmitted)) +
+  geom_boxplot()
+plot_2 <- ggplot(diagTrain, aes(x = readmitted, y = num_medications, color = change)) +
+  geom_boxplot()
+plot_3 <- ggplot(diagTrain, aes(x = time_in_hospital, color = readmitted)) +
+  geom_histogram()
+plot_4 <- ggplot(diagTrain, aes(x = num_lab_procedures, color = readmitted)) +
+  geom_histogram(stat="bin", "binwidth" = 3)
+plot_5 <- ggplot(diagTrain, aes(x = number_emergency, color = readmitted)) +
+  geom_histogram(stat="bin", "binwidth" = 1)
+plot_6 <- ggplot(diagTrain, aes(x = number_inpatient, color = readmitted)) +
+  geom_histogram(stat="bin", "binwidth" = 1)
+plot_7<- ggplot(diagTrain, aes(x = gender, color = readmitted)) +
+  geom_histogram(stat="count", "binwidth" = 3)
+plot_1
+plot_2
+plot_3
+plot_4
+plot_5
+plot_6
+plot_7
+
+table(diagTrain$gender)
+str(diagTrain$gender)
+
+
+counts2 <- table(diagTrain$readmitted, diagTrain$age)
+barplot(counts2, main="Readmitted by Age",
+        xlab="Age", col=c("darkblue","green"),
+        legend = rownames(counts2), beside=TRUE)
+
+plot(x = diabetes_load$readmitted, y = diabetes_load$number_inpatient, type = "h")
+
+```
+I wanted to see some variables that made sense to compare. It was interesting to see the relationship between readmitted and number of lab procedures, number of medications, and readmission by age. I chose to use stacked bar charts so that I could see the readmitted vs not readmitted values in comparison to the variable that I wanted to visualize. I chose to use box plots to see the range of which the variable was dispersed with comparison to the variable that I wanted to compare it to. This helped to see the mean, high, low, and outliers within that variable. 
+```{r}
+#PREPROCESSING
+#train
+htrain <- preProcess(diagTrain, method = c("center", "scale"))
+transformedTrain <- predict(htrain, diagTrain)
+
+nearZeroVar(transformedTrain, saveMetrics = TRUE)
+#test
+htest <- preProcess(diagTest, method = c("center", "scale"))
+transformedTest <- predict(htest, diagTest)
+```
+Normalized the variables to allow the model to run better on more scaled variables. I used the near zero var line to see the variance of the variables to determine which variables would have a wide enough range to create a significance within the analysis. I scaled the data before clustering to make sure to run the clustering on a normalized data set and the metrics would output on points that were reasonably comparable. 
+```{r}
+#CLUSTERING
+##creating dummy variables for clustering 
+dummy_traintransformedTrain <- dummy.data.frame(transformedTrain, sep = ".")
+```
+Created dummy variables to run k-means clustering to transform the variables to numeric instead of categorical
+```{r}
+##clustering -Hierarchal
+
+h_clust <- hclust(dist(dummy_traintransformedTrain), method ="complete")
+par(mfrow =c(1,3))
+plot(h_clust, main ="Complete_linkage", xlab ="", sub="", cex = .9)
+cutree(h_clust, 2)
+
+```
+
+
+```{r}
+#clustering- k-means
+diabetic_clus <- kmeans(dummy_traintransformedTrain, 4)
+str(diabetic_clus)
+p1 <- fviz_cluster(diabetic_clus, geom = "point", data =dummy_traintransformedTrain ) + ggtitle("k = 4")
+p1
+
+#silhouette(diabetic_clus$cluster, dist(dummy_traintransformedTrain))
+```
+I chose 4 clusters for k-means because there were four levels in the hierarchical  clustering and decided to use this as the parameter for clustering. Used the fviz function to visualize the cluster, however, this visualization was not very useful because the clusters were overlapping. Because of this,random forest was used to determine the most important features for the model. Tried to run the silhouette score, however, it took too long to run and could not output the metrics of the silhouette scores in a timely manner.  
+
+```{r}
+#SMALL TRAINING SETS
+# split training data into further 5 training sets
+trainIndex1 <- createDataPartition(transformedTrain$readmitted, p = .2, 
+                                   list = FALSE, 
+                                   times = 5)
+head(trainIndex1)
+trainDiabetic1 <-transformedTrain[trainIndex1[,1],]
+trainDiabetic2 <-transformedTrain[trainIndex1[,2],]
+trainDiabetic3 <-transformedTrain[trainIndex1[,3],]
+trainDiabetic4 <-transformedTrain[trainIndex1[,4],]
+trainDiabetic5 <-transformedTrain[trainIndex1[,5],]
+```
+Broke the training data set into smaller data sets due to time constraints when running the models. 
+
+```{r}
+#RUNNING MODELS
+trctrl <-trainControl(method ="repeatedcv", number = 10, repeats = 3, sampling = "down")
+```
+Chose repeated cross validation and sampling down because of class imbalance.
+```{r}
+#Random Forest 
+RF_grid <- expand.grid(mtry = c(1, 2, 3, 4, 5, 6), min.node.size = c(1, 3, 5, 10), splitrule = "gini")
+RF_model <- train(readmitted~race+gender+age+admission_source_id+time_in_hospital+num_lab_procedures+num_medications+number_outpatient+number_emergency+number_inpatient+diag_1+number_diagnoses+insulin+change+diabetesMed, data = trainDiabetic1, method = "ranger", importance ="impurity",trControl = trainControl(classProbs=TRUE,  sampling = "down"), tuneLength = 10, tuneGrid = RF_grid)
+
+RF <- predict(RF_model, newdata = transformedTest, na.action = na.pass)
+confusionMatrix(RF, transformedTest$readmitted)$byClass[7]
+
+RF_model
+varImp(RF_model)
+```
+
+```{r}
+#Visualizing variables found in random forest
+
+
+labprocedures_hist <- ggplot(diagTrain, aes(x = num_lab_procedures, color = readmitted)) +
+  geom_histogram(stat="bin", "binwidth" = 3)
+
+labprocedure_box <- ggplot(diagTrain, aes(x = readmitted, y = num_lab_procedures)) +
+  geom_boxplot()
+
+num_med_hist <- ggplot(diagTrain, aes(x = num_medications, color = readmitted)) +
+  geom_histogram(stat="bin", "binwidth" = 2)
+
+num_med_box <- ggplot(diagTrain, aes(x = readmitted, y = num_medications)) +
+  geom_boxplot()
+
+time_in_hospital_hist <- ggplot(diagTrain, aes(x = time_in_hospital, color = readmitted)) +
+  geom_histogram(stat="bin", "binwidth" = 2)
+
+time_in_hospital_box <- ggplot(diagTrain, aes(x = readmitted, y = time_in_hospital)) +
+  geom_boxplot()
+
+number_diagnoses_hist <- ggplot(diagTrain, aes(x = number_diagnoses, color = readmitted)) +
+  geom_histogram(stat="bin", "binwidth" = 2)
+
+number_diagnoses_box <- ggplot(diagTrain, aes(x = readmitted, y = number_diagnoses)) +
+  geom_boxplot()
+
+number_inpatient_hist <- ggplot(diagTrain, aes(x = number_inpatient, color = readmitted)) +
+  geom_histogram(stat="bin", "binwidth" = 2)
+
+number_inpatient_box <- ggplot(diagTrain, aes(x = readmitted, y = number_inpatient)) +
+  geom_boxplot()
+
+number_outpatient_hist <- ggplot(diagTrain, aes(x = number_outpatient, color = readmitted)) +
+  geom_histogram(stat="bin", "binwidth" = 2)
+
+number_outpatient_box <- ggplot(diagTrain, aes(x = readmitted, y = number_outpatient)) +
+  geom_boxplot()
+
+number_emergency_hist <- ggplot(diagTrain, aes(x = number_emergency, color = readmitted)) +
+  geom_histogram(stat="bin", "binwidth" = 2)
+
+number_emergency_box <- ggplot(diagTrain, aes(x = readmitted, y = number_emergency)) +
+  geom_boxplot()
+
+labprocedures_hist
+labprocedure_box
+num_med_hist
+num_med_box
+time_in_hospital_hist
+time_in_hospital_box
+number_diagnoses_hist
+number_diagnoses_box
+number_inpatient_hist
+number_inpatient_box
+number_outpatient_hist
+number_outpatient_box
+number_emergency_hist
+number_emergency_box 
+
+
+```
+
+```{r}
+#GLM model
+
+GLM_model <- train(readmitted~num_lab_procedures+ num_medications+ time_in_hospital+ number_diagnoses +number_inpatient+number_outpatient+gender+discharge_disposition_id+race+number_emergency, data=transformedTrain, trControl=trctrl, method="glm")
+
+GLM_pred <- predict(GLM_model, newdata = transformedTest)
+confusionMatrix(GLM_pred, transformedTest$readmitted)$byClass[7]
+```
+***Explanation: See results under SVM Linear. However, I did not use this algorithm because the sens and spec rates were not higher than the others.
+```{r}
+#SVM
+svm_Linear <-train(readmitted ~num_lab_procedures+ num_medications+ time_in_hospital+ number_diagnoses+number_inpatient+number_outpatient+gender+discharge_disposition_id+race+number_emergency+ race+change+age+insulin+admission_type_id+diag_1+admission_source_id,data=transformedTrain
+                   , method ="svmLinear", 
+                   trControl=trctrl,
+                   tuneLength=10)
+SVM_pred <- predict(svm_Linear, newdata = transformedTest)
+confusionMatrix(SVM_pred, transformedTest$readmitted)$byClass[7]
+
+```
+Because my positive class is “No” our negative values would be those who are less than 30, therefore I would want a higher specificity rate because I would rather (in this case because we want less than 30 which is ‘Yes’) have a higher true negative rate to predict more people to come in the hospital rather than less people and be unprepared. Therefore, chose the GLM model because it had a specificity rate of .46 rather than the SVM Linear model that was .36. However, these rates are very low and decided this is due to a large class imbalance. Tried to change the sampling method to ‘up’, ‘down’, ‘ROSE’, and ‘boot’ to see if these would raise sensitivity and specificity levels, however, could not get above 70 and 40 percent.  
+
+
+```{r Plotting ROC curve for Linear Regression Model for training set}
+train_LM_pred <- predict(GLM_model, newdata = transformedTrain)
+roc.curve(transformedTrain$readmitted, train_LM_pred, main="ROC curve")
+```
+The AUC was .585, therefore clearly did not have a good enough model. I believe this is because of class imbalance. Tried to resample the data using multiple methods (boot, up down) however, none of these ultimatly changed the specificity/sensitivity rates enough to include them in the analysis. 
+```{r}
+roc.curve(transformedTrain$readmitted, train_LM_pred, 
+          main="ROC curve")
+roc.curve(transformedTest$readmitted, GLM_pred, add=TRUE, col=2, 
+          lwd=2, lty=2)
+legend("topleft", c("Resubstitution estimate", "Holdout estimate"), 
+        col=1:2, lty=1:2, lwd=2)
+```
+
+This is comparing the training and the testing data, both due to class imbalance. 
